@@ -20,8 +20,8 @@ import mrc
 import typing_utils
 from mrc.core import operators as ops
 
-from morpheus._lib.common import FileTypes
 from morpheus.cli import register_stage
+from morpheus.common import FileTypes
 from morpheus.config import Config
 from morpheus.config import PipelineModes
 from morpheus.io.deserializers import read_file_to_df
@@ -50,9 +50,9 @@ class FileSourceStage(PreallocatorMixin, SingleOutputSource):
     iterative : boolean, default = False, is_flag = True
         Iterative mode will emit dataframes one at a time. Otherwise a list of dataframes is emitted. Iterative mode is
         good for interleaving source stages.
-    file_type : `morpheus._lib.common.FileTypes`, default = 'auto'
+    file_type : `morpheus.common.FileTypes`, optional, case_sensitive = False
         Indicates what type of file to read. Specifying 'auto' will determine the file type from the extension.
-        Supported extensions: 'json', 'csv'
+        Supported extensions: 'csv', 'json' and 'jsonlines'
     repeat : int, default = 1, min = 1
         Repeats the input dataset multiple times. Useful to extend small datasets for debugging.
     filter_null : bool, default = True

@@ -1,4 +1,4 @@
-/**
+/*
  * SPDX-FileCopyrightText: Copyright (c) 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -16,9 +16,7 @@
  */
 
 #include <gflags/gflags.h>  // for ParseCommandLineFlags
-
 #include <glog/logging.h>
-
 #include <gtest/gtest.h>  // IWYU pragma: keep
 
 int main(int argc, char** argv)

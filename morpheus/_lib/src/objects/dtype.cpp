@@ -1,4 +1,4 @@
-/**
+/*
  * SPDX-FileCopyrightText: Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -26,6 +26,7 @@
 #include <sstream>  // Needed by MORPHEUS_CONCAT_STR
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 const std::map<char, std::map<size_t, morpheus::TypeId>> StrToTypeId = {

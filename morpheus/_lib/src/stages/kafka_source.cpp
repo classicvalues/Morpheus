@@ -1,4 +1,4 @@
-/**
+/*
  * SPDX-FileCopyrightText: Copyright (c) 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
@@ -17,6 +17,11 @@
 
 #include "morpheus/stages/kafka_source.hpp"
 
+#include "mrc/node/rx_sink_base.hpp"
+#include "mrc/node/rx_source_base.hpp"
+#include "mrc/node/source_properties.hpp"
+#include "mrc/segment/object.hpp"
+
 #include "morpheus/io/deserializers.hpp"
 #include "morpheus/messages/meta.hpp"
 #include "morpheus/utilities/stage_util.hpp"
@@ -24,12 +29,7 @@
 
 #include <boost/fiber/operations.hpp>  // for sleep_for, yield
 #include <boost/fiber/recursive_mutex.hpp>
-#include <cudf/column/column.hpp>  // for column
 #include <cudf/io/json.hpp>
-#include <cudf/scalar/scalar.hpp>  // for string_scalar
-#include <cudf/strings/replace.hpp>
-#include <cudf/strings/strings_column_view.hpp>  // for strings_column_view
-#include <cudf/table/table.hpp>                  // for table
 #include <glog/logging.h>
 #include <librdkafka/rdkafkacpp.h>
 #include <mrc/runnable/context.hpp>
@@ -40,7 +40,7 @@
 
 #include <algorithm>  // for find, min, transform
 #include <chrono>
-#include <cstddef>
+#include <compare>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -57,6 +57,17 @@
 // IWYU pragma: no_include <atomic>
 // IWYU pragma: no_include <ext/alloc_traits.h>
 
+/**
+ * @addtogroup stages
+ * @{
+ * @file
+ */
+
+/**
+ * @brief Checks the error code returned by an RDKafka expression (`command`) against an `expected` code
+ * (usually `RdKafka::ERR_NO_ERROR`), and logs an error otherwise.
+ *
+ */
 #define CHECK_KAFKA(command, expected, msg)                                                                    \
     {                                                                                                          \
         RdKafka::ErrorCode __code = command;                                                                   \
@@ -70,7 +81,7 @@
 namespace morpheus {
 // Component-private classes.
 // ************ KafkaSourceStage__UnsubscribedException**************//
-class KafkaSourceStage__UnsubscribedException : public std::exception
+class KafkaSourceStageUnsubscribedException : public std::exception
 {};
 
 class KafkaSourceStageStopAfter : public std::exception
@@ -80,8 +91,8 @@ class KafkaSourceStageStopAfter : public std::exception
 class KafkaSourceStage__Rebalancer : public RdKafka::RebalanceCb  // NOLINT
 {
   public:
-    KafkaSourceStage__Rebalancer(std::function<int32_t()> batch_timeout_fn,
-                                 std::function<std::size_t()> max_batch_size_fn,
+    KafkaSourceStage__Rebalancer(std::function<uint32_t()> batch_timeout_fn,
+                                 std::function<TensorIndex()> max_batch_size_fn,
                                  std::function<std::string(std::string)> display_str_fn,
                                  std::function<bool(std::vector<std::unique_ptr<RdKafka::Message>>&)> process_fn);
 
@@ -146,8 +157,8 @@ class KafkaSourceStage__Rebalancer : public RdKafka::RebalanceCb  // NOLINT
   private:
     bool m_is_rebalanced{false};
 
-    std::function<int32_t()> m_batch_timeout_fn;
-    std::function<std::size_t()> m_max_batch_size_fn;
+    std::function<uint32_t()> m_batch_timeout_fn;
+    std::function<TensorIndex()> m_max_batch_size_fn;
     std::function<std::string(std::string)> m_display_str_fn;
     std::function<bool(std::vector<std::unique_ptr<RdKafka::Message>>&)> m_process_fn;
 
@@ -156,8 +167,8 @@ class KafkaSourceStage__Rebalancer : public RdKafka::RebalanceCb  // NOLINT
 };
 
 KafkaSourceStage__Rebalancer::KafkaSourceStage__Rebalancer(
-    std::function<int32_t()> batch_timeout_fn,
-    std::function<std::size_t()> max_batch_size_fn,
+    std::function<uint32_t()> batch_timeout_fn,
+    std::function<TensorIndex()> max_batch_size_fn,
     std::function<std::string(std::string)> display_str_fn,
     std::function<bool(std::vector<std::unique_ptr<RdKafka::Message>>&)> process_fn) :
   m_batch_timeout_fn(std::move(batch_timeout_fn)),
@@ -251,13 +262,13 @@ class KafkaRebalancer : public RdKafka::RebalanceCb
 
 // Component public implementations
 // ************ KafkaStage ************************* //
-KafkaSourceStage::KafkaSourceStage(std::size_t max_batch_size,
+KafkaSourceStage::KafkaSourceStage(TensorIndex max_batch_size,
                                    std::string topic,
-                                   int32_t batch_timeout_ms,
+                                   uint32_t batch_timeout_ms,
                                    std::map<std::string, std::string> config,
                                    bool disable_commit,
                                    bool disable_pre_filtering,
-                                   size_t stop_after,
+                                   TensorIndex stop_after,
                                    bool async_commits) :
   PythonSource(build()),
   m_max_batch_size(max_batch_size),
@@ -273,7 +284,7 @@ KafkaSourceStage::KafkaSourceStage(std::size_t max_batch_size,
 KafkaSourceStage::subscriber_fn_t KafkaSourceStage::build()
 {
     return [this](rxcpp::subscriber<source_type_t> sub) -> void {
-        size_t records_emitted = 0;
+        TensorIndex records_emitted = 0;
         // Build rebalancer
         KafkaSourceStage__Rebalancer rebalancer(
             [this]() { return this->batch_timeout_ms(); },
@@ -286,7 +297,7 @@ KafkaSourceStage::subscriber_fn_t KafkaSourceStage::build()
                 // If we are unsubscribed, throw an error to break the loops
                 if (!sub.is_subscribed())
                 {
-                    throw KafkaSourceStage__UnsubscribedException();
+                    throw KafkaSourceStageUnsubscribedException();
                 }
                 else if (m_stop_after > 0 && records_emitted >= m_stop_after)
                 {
@@ -365,12 +376,12 @@ KafkaSourceStage::subscriber_fn_t KafkaSourceStage::build()
     };
 }
 
-std::size_t KafkaSourceStage::max_batch_size()
+TensorIndex KafkaSourceStage::max_batch_size()
 {
     return m_max_batch_size;
 }
 
-int32_t KafkaSourceStage::batch_timeout_ms()
+uint32_t KafkaSourceStage::batch_timeout_ms()
 {
     return m_batch_timeout_ms;
 }
@@ -443,7 +454,7 @@ std::unique_ptr<RdKafka::KafkaConsumer> KafkaSourceStage::create_consumer(RdKafk
 
     RdKafka::Metadata* md;
 
-    for (size_t i = 0; i < 5; ++i)
+    for (unsigned short i = 0; i < 5; ++i)
     {
         auto err_code = consumer->metadata(spec_topic == nullptr, spec_topic.get(), &md, 1000);
 
@@ -574,13 +585,13 @@ std::shared_ptr<morpheus::MessageMeta> KafkaSourceStage::process_batch(
 std::shared_ptr<mrc::segment::Object<KafkaSourceStage>> KafkaSourceStageInterfaceProxy::init(
     mrc::segment::Builder& builder,
     const std::string& name,
-    size_t max_batch_size,
+    TensorIndex max_batch_size,
     std::string topic,
-    int32_t batch_timeout_ms,
+    uint32_t batch_timeout_ms,
     std::map<std::string, std::string> config,
     bool disable_commit,
     bool disable_pre_filtering,
-    size_t stop_after,
+    TensorIndex stop_after,
     bool async_commits)
 {
     auto stage = builder.construct_object<KafkaSourceStage>(name,
